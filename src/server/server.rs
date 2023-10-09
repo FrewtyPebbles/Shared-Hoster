@@ -1,55 +1,67 @@
 use std::{net::{TcpListener, TcpStream}, io::{BufReader, BufRead, Read, Write}, sync::{Mutex, Arc}};
 
+
 use crate::{server::request::Request, utility::threadpool::ThreadPool};
 
 use super::response::Response;
 
 pub struct Server {
 	tcp_listener: TcpListener,
-	port:u32,
-	terminate:Arc<Mutex<bool>>,
-	port_list:Arc<Mutex<Vec<u32>>>
+	pub port: u32,
+	pub terminate: Arc<Mutex<bool>>,
+	server_identity_list: Arc<Mutex<Vec<(String, u32, Arc<Mutex<bool>>)>>>,
+	pub token: String
 }
 
 impl Server {
-	pub fn new(port_list:&mut Arc<Mutex<Vec<u32>>>) -> Server {
-		let mut port = 8080;
-		while port_list.lock().unwrap().contains(&port) {
+	pub fn new(server_identity_list:&mut Arc<Mutex<Vec<(String, u32, Arc<Mutex<bool>>)>>>) -> Server {
+		let mut port = 65535;
+
+		while server_identity_list.lock().unwrap().iter().any(|(t, p, ter)| *p == port) {
 			port -= 1;
 		}
 
-		// Add port to port list.
-		port_list.lock().unwrap().push(port);
-
-		// return the server instance.
-		return Server {
+		let server = Server {
 			tcp_listener: TcpListener::bind(format!("127.0.0.1:{port}")).unwrap(),
 			port,
 			terminate: Arc::new(Mutex::new(false)),
-			port_list: port_list.clone()
+			server_identity_list: server_identity_list.clone(),
+			token: sha256::digest(format!("server:{port}")),
 		};
+
+		// Add server identity to server identity list.
+		server_identity_list.lock().unwrap().push((server.token.clone(), server.port.clone(), server.terminate.clone()));
+
+		// return the server instance.
+		return server
 	}
 
 	pub fn run(&self) {
-		println!("New Instance running on port: {}", self.port);
+		println!("New Instance running on port: {}\ntoken:{}", self.port, self.token);
 		let pool = ThreadPool::new(30);
 		for stream in self.tcp_listener.incoming() {
 			let stream = stream.unwrap();
 			let port_clone = self.port.clone();
-			let port_list_clone = self.port_list.clone();
+			let token_clone = self.token.clone();
+			let server_identity_list_clone = self.server_identity_list.clone();
 			let terminate_clone = self.terminate.clone();
 			pool.execute(move || {
-				handle_request(stream, port_clone, port_list_clone, terminate_clone);
+				handle_request(stream, port_clone, server_identity_list_clone, terminate_clone, token_clone);
 			});
-			if self.terminate.lock().unwrap().clone() {break}
+			if *self.terminate.lock().unwrap() {break}
 		}
 		println!("Instance on port {} has successfully shut down.", self.port)
 	}
 
 	pub fn stop(&mut self) {
-		// Remove port from port list.
-		let index = self.port_list.lock().unwrap().iter().position(|x| *x == self.port).unwrap();
-		self.port_list.lock().unwrap().remove(index);
+		// Remove port from server identity list.
+		let current_list = self.server_identity_list.lock().unwrap().clone();
+		for (index, (token, port, terminate)) in current_list.iter().enumerate() {
+			if self.port == *port {
+				self.server_identity_list.lock().unwrap().remove(index);
+				break;
+			}
+		}
 
 		let mut terminate = self.terminate.lock().unwrap();
 		*terminate = true;
@@ -57,47 +69,78 @@ impl Server {
 	}
 }
 
-fn stop_server(port:u32, port_list: Arc<Mutex<Vec<u32>>>, terminate: Arc<Mutex<bool>>) {
-	// Remove port from port list.
-	let index_option = port_list.lock().unwrap().clone().iter().position(|x| *x == port);
-	if index_option.is_none() {return;}
-	port_list.lock().unwrap().remove(index_option.unwrap());
+pub fn stop_server(server_port:u32, server_identity_list: &Arc<Mutex<Vec<(String, u32, Arc<Mutex<bool>>)>>>, server_terminate: &Arc<Mutex<bool>>) {
+	// Remove port from server identity list.
 
-	let mut terminate_mut = terminate.lock().unwrap();
+	let mut terminate_mut = server_terminate.lock().unwrap();
 	*terminate_mut = true;
+
+	let current_list = server_identity_list.lock().unwrap().clone();
+	for (index, (token, port, terminate)) in current_list.iter().enumerate() {
+		if server_port == *port {
+			server_identity_list.lock().unwrap().remove(index);
+			break;
+		}
+	}
+
+	dbg!(server_identity_list);
 	
 }
 
-fn handle_request(mut stream: TcpStream, port:u32, port_list: Arc<Mutex<Vec<u32>>>, terminate: Arc<Mutex<bool>>) {
-	let request = serialize_request(&stream);
-	
+fn handle_request(mut stream: TcpStream, port:u32, server_identity_list: Arc<Mutex<Vec<(String, u32, Arc<Mutex<bool>>)>>>, terminate: Arc<Mutex<bool>>, token: String) {
+	let request_result = serialize_request(&stream);
+
 	let mut response = Response::new();
 
 	response.status = 200;
-	response.headers.push("Access-Control-Allow-Origin: *".to_string());
-	response.headers.push("Content-Type: text/html; charset=utf-8".to_string());
-	response.body = format!("<!DOCTYPE html>
-		<html lang=\"en\">
-		<head>
-			<meta charset=\"UTF-8\">
-			<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
-			<meta http-equiv=\"X-UA-Compatible\" content=\"ie=edge\">
-			<title>Instance {}</title>
-		</head>
-		<body>
-			This is a DomBuilder Instance on port {}.
-			<script></script>
-		</body>
-		</html>", port, port).to_string();
 
-	stream.write_all(response.render().as_bytes()).unwrap();
-	if request.method == "UNHOST" {
-		stop_server(port, port_list, terminate)
-	}
+	// check if there were any problems with the request
+	match request_result {
+		Err(status) => {
+			// request status is bad
+			response.status = status;
+			response.body = "Bad Request.".to_string();
+			stream.write_all(response.render().as_bytes()).unwrap();
+		}
+		Ok(request) => {
+			// request status in the 200 range
+		
+			response.headers.push("Access-Control-Allow-Origin: *".to_string());
+			response.headers.push("Content-Type: text/html; charset=utf-8".to_string());
+			response.body = format!("<!DOCTYPE html>
+				<html lang=\"en\">
+				<head>
+					<meta charset=\"UTF-8\">
+					<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+					<meta http-equiv=\"X-UA-Compatible\" content=\"ie=edge\">
+					<title>Instance {}</title>
+				</head>
+				<body>
+					This is a DomBuilder Instance on port {}.
+					<script></script>
+				</body>
+				</html>", port, port).to_string();
+		
+			
+			if request.method == "UNHOST" {
+				if request.body == token {
+					response.body = "Server Will shut down on next request.".to_string();
+					stream.write_all(response.render().as_bytes()).unwrap();
+					stop_server(port, &server_identity_list, &terminate);
+				} else {
+					response.body = "UNHOST request requires the correct server token in the body.".to_string();
+					stream.write_all(response.render().as_bytes()).unwrap();
+				}
+			} else {
+				stream.write_all(response.render().as_bytes()).unwrap();
+			}
+		
+		}
+	};
 }
 
 // Request handling: 
-fn serialize_request(mut stream: &TcpStream) -> Request {
+fn serialize_request(mut stream: &TcpStream) -> Result<Request, u16> {
 	let mut buf_reader = BufReader::new(&mut stream);
 	
 	
