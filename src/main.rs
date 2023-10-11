@@ -10,6 +10,8 @@ mod manager;
 mod gateway;
 mod utility;
 
+// TODO: Switch server from a thread pool to asyncronous tokio sockets.
+
 fn main() {
     // Get the arguments into a hashmap:
     let args = cli::get_args();
