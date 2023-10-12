@@ -1,84 +1,91 @@
-use std::{net::{TcpListener, TcpStream}, io::{BufReader, BufRead, Read, Write}, sync::{Mutex, Arc}};
+use std::{sync::Arc, borrow::BorrowMut};
 
 
-use crate::{server::request::Request, utility::threadpool::ThreadPool};
+use tokio::{sync::Mutex, net::{TcpListener, TcpStream, tcp::ReadHalf}, io::{AsyncWriteExt, AsyncReadExt, BufReader, AsyncBufReadExt}};
 
-use super::response::Response;
+use crate::server::request::Request;
+
+use super::{response::Response, api::api::API};
 
 pub struct Server {
 	tcp_listener: TcpListener,
 	pub port: u32,
 	pub terminate: Arc<Mutex<bool>>,
 	server_identity_list: Arc<Mutex<Vec<(String, u32, Arc<Mutex<bool>>)>>>,
-	pub token: String
+	pub token: String,
+	api: API
 }
 
 impl Server {
-	pub fn new(server_identity_list:&mut Arc<Mutex<Vec<(String, u32, Arc<Mutex<bool>>)>>>) -> Server {
+	pub async fn new(server_identity_list:&mut Arc<Mutex<Vec<(String, u32, Arc<Mutex<bool>>)>>>) -> Server {
 		let mut port = 65535;
 
-		while server_identity_list.lock().unwrap().iter().any(|(t, p, ter)| *p == port) {
+		while server_identity_list.lock().await.iter().any(|(t, p, ter)| *p == port) {
 			port -= 1;
 		}
 
+		let token = sha256::digest(format!("server:{port}"));
+
 		let server = Server {
-			tcp_listener: TcpListener::bind(format!("127.0.0.1:{port}")).unwrap(),
+			tcp_listener: TcpListener::bind(format!("127.0.0.1:{port}")).await.unwrap(),
 			port,
 			terminate: Arc::new(Mutex::new(false)),
 			server_identity_list: server_identity_list.clone(),
-			token: sha256::digest(format!("server:{port}")),
+			api: API::new(token.clone()),
+			token
 		};
 
 		// Add server identity to server identity list.
-		server_identity_list.lock().unwrap().push((server.token.clone(), server.port.clone(), server.terminate.clone()));
+		server_identity_list.lock().await.push((server.token.clone(), server.port.clone(), server.terminate.clone()));
 
 		// return the server instance.
 		return server
 	}
 
-	pub fn run(&self) {
+	pub async fn run(&self) {
 		println!("New Instance running on port: {}\ntoken:{}", self.port, self.token);
-		let pool = ThreadPool::new(30);
-		for stream in self.tcp_listener.incoming() {
-			let stream = stream.unwrap();
+		loop {
+			let (stream,_) = self.tcp_listener.accept().await.unwrap();
+			// clone data to move.
 			let port_clone = self.port.clone();
 			let token_clone = self.token.clone();
 			let server_identity_list_clone = self.server_identity_list.clone();
 			let terminate_clone = self.terminate.clone();
-			pool.execute(move || {
-				handle_request(stream, port_clone, server_identity_list_clone, terminate_clone, token_clone);
+			// Handle the request
+			tokio::spawn(async move {
+				handle_request(stream, port_clone, server_identity_list_clone, terminate_clone, token_clone).await;
 			});
-			if *self.terminate.lock().unwrap() {break}
+			if *self.terminate.lock().await {break}
 		}
 		println!("Instance on port {} has successfully shut down.", self.port)
 	}
 
-	pub fn stop(&mut self) {
+	pub async fn stop(&mut self) {
 		// Remove port from server identity list.
-		let current_list = self.server_identity_list.lock().unwrap().clone();
+		let current_list = self.server_identity_list.lock().await.clone();
 		for (index, (token, port, terminate)) in current_list.iter().enumerate() {
 			if self.port == *port {
-				self.server_identity_list.lock().unwrap().remove(index);
+				self.server_identity_list.lock().await.remove(index);
 				break;
 			}
 		}
 
-		let mut terminate = self.terminate.lock().unwrap();
+		let mut terminate = self.terminate.lock().await;
 		*terminate = true;
 		
 	}
 }
 
-pub fn stop_server(server_port:u32, server_identity_list: &Arc<Mutex<Vec<(String, u32, Arc<Mutex<bool>>)>>>, server_terminate: &Arc<Mutex<bool>>) {
+pub async fn stop_server(server_port:u32, server_identity_list: &Arc<Mutex<Vec<(String, u32, Arc<Mutex<bool>>)>>>, server_terminate: &Arc<Mutex<bool>>) {
 	// Remove port from server identity list.
 
-	let mut terminate_mut = server_terminate.lock().unwrap();
+	let mut terminate_mut = server_terminate.lock().await;
 	*terminate_mut = true;
 
-	let current_list = server_identity_list.lock().unwrap().clone();
+	let current_list = server_identity_list.lock().await.clone();
 	for (index, (token, port, terminate)) in current_list.iter().enumerate() {
 		if server_port == *port {
-			server_identity_list.lock().unwrap().remove(index);
+			server_identity_list.lock().await.remove(index);
 			break;
 		}
 	}
@@ -87,8 +94,11 @@ pub fn stop_server(server_port:u32, server_identity_list: &Arc<Mutex<Vec<(String
 	
 }
 
-fn handle_request(mut stream: TcpStream, port:u32, server_identity_list: Arc<Mutex<Vec<(String, u32, Arc<Mutex<bool>>)>>>, terminate: Arc<Mutex<bool>>, token: String) {
-	let request_result = serialize_request(&stream);
+async fn handle_request(mut stream: TcpStream, port:u32, server_identity_list: Arc<Mutex<Vec<(String, u32, Arc<Mutex<bool>>)>>>, terminate: Arc<Mutex<bool>>, token: String) {
+	
+	let (mut stream_read, mut stream_write) = stream.split();
+
+	let request_result = serialize_request(&mut stream_read).await;
 
 	let mut response = Response::new();
 
@@ -100,7 +110,7 @@ fn handle_request(mut stream: TcpStream, port:u32, server_identity_list: Arc<Mut
 			// request status is bad
 			response.status = status;
 			response.body = "Bad Request.".to_string();
-			stream.write_all(response.render().as_bytes()).unwrap();
+			stream_write.write_all(response.render().as_bytes()).await.unwrap();
 		}
 		Ok(request) => {
 			// request status in the 200 range
@@ -125,14 +135,14 @@ fn handle_request(mut stream: TcpStream, port:u32, server_identity_list: Arc<Mut
 			if request.method == "UNHOST" {
 				if request.body == token {
 					response.body = "Server Will shut down on next request.".to_string();
-					stream.write_all(response.render().as_bytes()).unwrap();
-					stop_server(port, &server_identity_list, &terminate);
+					stream_write.write_all(response.render().as_bytes()).await.unwrap();
+					stop_server(port, &server_identity_list, &terminate).await;
 				} else {
 					response.body = "UNHOST request requires the correct server token in the body.".to_string();
-					stream.write_all(response.render().as_bytes()).unwrap();
+					stream_write.write_all(response.render().as_bytes()).await.unwrap();
 				}
 			} else {
-				stream.write_all(response.render().as_bytes()).unwrap();
+				stream_write.write_all(response.render().as_bytes()).await.unwrap();
 			}
 		
 		}
@@ -140,15 +150,22 @@ fn handle_request(mut stream: TcpStream, port:u32, server_identity_list: Arc<Mut
 }
 
 // Request handling: 
-fn serialize_request(mut stream: &TcpStream) -> Result<Request, u16> {
-	let mut buf_reader = BufReader::new(&mut stream);
+async fn serialize_request(read_stream: &mut ReadHalf<'_>) -> Result<Request, u16> {
+	let mut buf_reader = BufReader::new(read_stream);
 	
+	let mut http_request: Vec<String> = vec![];
+
+
+	{
+		//get line itterator
+		let mut buf_reader_lines = buf_reader.borrow_mut().lines();
 	
-	let http_request: Vec<_> = buf_reader.by_ref()
-		.lines()
-		.map(|result| result.unwrap())
-		.take_while(|line| !line.is_empty())
-		.collect();
+		loop {
+			let line = buf_reader_lines.next_line().await.unwrap().unwrap(); // read the next line.
+			if line.is_empty() {break;} // guard against split between body and headers
+			http_request.push(line)
+		}
+	}
 
 	let mut content_length = 0;
 
@@ -163,7 +180,7 @@ fn serialize_request(mut stream: &TcpStream) -> Result<Request, u16> {
 
 	let mut body = vec![0; content_length];
 	
-	buf_reader.read_exact(&mut body).unwrap();
+	buf_reader.read_exact(&mut body).await.unwrap();
 
 	let raw_http_request = http_request.join("\n") + "\n\n" + &String::from_utf8(body).unwrap();
 

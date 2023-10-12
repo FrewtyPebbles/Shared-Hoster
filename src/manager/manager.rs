@@ -1,7 +1,9 @@
 use core::time;
-use std::{sync::{Arc, Mutex}, thread};
+use std::{thread, sync::Arc};
 
-use crate::{utility::threadpool::ThreadPool, server::server::{Server, stop_server}};
+use tokio::sync::Mutex;
+
+use crate::{server::server::{Server, stop_server}, utility::threadpool::ThreadPool};
 
 
 
@@ -25,12 +27,12 @@ impl Manager {
 
         self.server_pool.execute( move || {
 
-			let server = Server::new(&mut sil_clone);
-
-            server.run();
+			deploy_async_server(&mut sil_clone);
 
         });
 	}
+
+	
 
 	pub fn deploy_all(&mut self) {
 		for _ in 0..self.max_servers {
@@ -39,23 +41,31 @@ impl Manager {
 		}
 	}
 
-	pub fn remove_server_by_token(&mut self, server_token:String) -> Result<(), &'static str> {
-		for (index, (token, port, terminate)) in self.server_identity_list.lock().unwrap().iter().enumerate() {
+	pub async fn remove_server_by_token(&mut self, server_token:String) -> Result<(), &'static str> {
+		for (index, (token, port, terminate)) in self.server_identity_list.lock().await.iter().enumerate() {
 			if server_token == *token {
-				stop_server(*port, &self.server_identity_list, terminate);
+				stop_server(*port, &self.server_identity_list, terminate).await;
 				return Ok(());
 			}
 		}
 		return Err("A server with the token provided does not exist.");
 	}
 
-	pub fn remove_server_by_port(&mut self, server_port:u32) -> Result<(), &'static str> {
-		for (index, (token, port, terminate)) in self.server_identity_list.lock().unwrap().iter().enumerate() {
+	pub async fn remove_server_by_port(&mut self, server_port:u32) -> Result<(), &'static str> {
+		for (index, (token, port, terminate)) in self.server_identity_list.lock().await.iter().enumerate() {
 			if server_port == *port {
-				stop_server(*port, &self.server_identity_list, terminate);
+				stop_server(*port, &self.server_identity_list, terminate).await;
 				return Ok(());
 			}
 		}
 		return Err("A server with the port provided does not exist.");
 	}
+}
+
+// deploys an asynchronous server
+#[tokio::main]
+async fn deploy_async_server(sil_clone: &mut Arc<Mutex<Vec<(String, u32, Arc<Mutex<bool>>)>>>) {// sil = server identity list 
+	let server = Server::new(sil_clone).await;
+
+	server.run().await;
 }

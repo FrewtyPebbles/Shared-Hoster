@@ -58,7 +58,7 @@ total = 0
 
 servers:list[Thread] = []
 
-for port in range(65535 - num_of_ports, 65535):
+for port in range(65536 - num_of_ports, 65536):
     servers.append(Thread(target=measure_server, args=[port]))
 
 for server in servers:
