@@ -7,3 +7,5 @@ This is a shared hosting server for websites made with the DOM Parser.
  - Unique `UNHOST` method for stopping servers.
 
  - Uses thread pools to host and manage multiple custom HTTP servers at once.
+
+ - Programmable Lua endpoints.
