@@ -95,8 +95,14 @@ impl Response {
 
 	pub fn render(&self) -> String {
 		let status = format!("HTTP/1.1 {} {}", self.status, self.get_status_msg());
-		let headers = self.headers.join("\n");
-
-		return format!("{}\n{}\nContent-Length: {}\n\n{}", status, headers, self.body.len(), self.body);
+		
+		// create a string of headers except content-length:
+		let headers = if self.headers.is_empty() {
+				"".to_string()
+			} else {
+				format!("{}\n", self.headers.join("\n"))
+			};
+		
+		return format!("{}\n{}Content-Length: {}\n\n{}", status, headers, self.body.len(), self.body);
 	}
 }

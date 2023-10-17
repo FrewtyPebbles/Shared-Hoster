@@ -42,7 +42,11 @@ impl Server {
 		return server
 	}
 
-	pub async fn run(&self) {
+	pub async fn run(&mut self) {
+		// TESTING:
+		self.api.add_lua_procedure("test".to_string(), "./testing/test.lua".to_string());
+		// TESTING END!
+
 		println!("New Instance running on port: {}\ntoken:{}", self.port, self.token);
 		loop {
 			let (stream,_) = self.tcp_listener.accept().await.unwrap();
@@ -51,9 +55,10 @@ impl Server {
 			let token_clone = self.token.clone();
 			let server_identity_list_clone = self.server_identity_list.clone();
 			let terminate_clone = self.terminate.clone();
+			let api_clone = self.api.clone();
 			// Handle the request
 			tokio::spawn(async move {
-				handle_request(stream, port_clone, server_identity_list_clone, terminate_clone, token_clone).await;
+				handle_request(stream, port_clone, server_identity_list_clone, terminate_clone, token_clone, api_clone).await;
 			});
 			if *self.terminate.lock().await {break}
 		}
@@ -94,7 +99,12 @@ pub async fn stop_server(server_port:u32, server_identity_list: &Arc<Mutex<Vec<(
 	
 }
 
-async fn handle_request(mut stream: TcpStream, port:u32, server_identity_list: Arc<Mutex<Vec<(String, u32, Arc<Mutex<bool>>)>>>, terminate: Arc<Mutex<bool>>, token: String) {
+async fn handle_request(
+	mut stream: TcpStream, port:u32, 
+	server_identity_list: Arc<Mutex<Vec<(String, u32, Arc<Mutex<bool>>)>>>, 
+	terminate: Arc<Mutex<bool>>, 
+	token: String, 
+	api: API) {
 	
 	let (mut stream_read, mut stream_write) = stream.split();
 
@@ -114,22 +124,29 @@ async fn handle_request(mut stream: TcpStream, port:u32, server_identity_list: A
 		}
 		Ok(request) => {
 			// request status in the 200 range
-		
-			response.headers.push("Access-Control-Allow-Origin: *".to_string());
-			response.headers.push("Content-Type: text/html; charset=utf-8".to_string());
-			response.body = format!("<!DOCTYPE html>
-				<html lang=\"en\">
-				<head>
-					<meta charset=\"UTF-8\">
-					<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
-					<meta http-equiv=\"X-UA-Compatible\" content=\"ie=edge\">
-					<title>Instance {}</title>
-				</head>
-				<body>
-					This is a DomBuilder Instance on port {}.
-					<script></script>
-				</body>
-				</html>", port, port).to_string();
+			if request.url.starts_with("/api") {
+				//fulfill api requests
+				response.body = api.fulfill_api_request(&request).await;
+			
+			} else {
+				//handle html requests
+				response.headers.push("Access-Control-Allow-Origin: *".to_string());
+				response.headers.push("Content-Type: text/html; charset=utf-8".to_string());
+				response.body = format!("<!DOCTYPE html>
+					<html lang=\"en\">
+					<head>
+						<meta charset=\"UTF-8\">
+						<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+						<meta http-equiv=\"X-UA-Compatible\" content=\"ie=edge\">
+						<title>Instance {}</title>
+					</head>
+					<body>
+						This is a DomBuilder Instance on port {}.
+						<script></script>
+					</body>
+					</html>", port, port).to_string();
+			}
+
 		
 			
 			if request.method == "UNHOST" {
@@ -141,7 +158,7 @@ async fn handle_request(mut stream: TcpStream, port:u32, server_identity_list: A
 					response.body = "UNHOST request requires the correct server token in the body.".to_string();
 					stream_write.write_all(response.render().as_bytes()).await.unwrap();
 				}
-			} else {
+			} else { // Not UNHOST
 				stream_write.write_all(response.render().as_bytes()).await.unwrap();
 			}
 		

@@ -1,0 +1,9 @@
+{
+	"Lua.diagnostics.globals": [
+		"set_response",
+		"Curl",
+		"JSON",
+		"append_response",
+		"get_response"
+	]
+}

@@ -65,7 +65,7 @@ impl Manager {
 // deploys an asynchronous server
 #[tokio::main]
 async fn deploy_async_server(sil_clone: &mut Arc<Mutex<Vec<(String, u32, Arc<Mutex<bool>>)>>>) {// sil = server identity list 
-	let server = Server::new(sil_clone).await;
+	let mut server = Server::new(sil_clone).await;
 
 	server.run().await;
 }

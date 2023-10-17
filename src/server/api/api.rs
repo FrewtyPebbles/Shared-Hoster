@@ -1,15 +1,17 @@
 use std::collections::HashMap;
 
+use tokio::runtime::Runtime;
+
 use crate::server::request::Request;
 
 use super::procedure::{Procedure, LuaProcedure};
 
 
 
-
+#[derive(Clone)]
 pub struct API {
 	procedures:HashMap<String, Procedure>, // key: api route, value: procedure to run.
-	token: String
+	token: String,
 }
 
 impl API {
@@ -21,13 +23,18 @@ impl API {
 		}
 	}
 
-	pub fn fulfill_api_request(&self, endpoint: String, req:Request) {
-		match self.procedures.get(&endpoint).unwrap() {
+	pub async fn fulfill_api_request(&self, req: &Request) -> String {
+		let procedure_enum = self.procedures.get(&req.url).unwrap().clone();
+		match procedure_enum {
 			Procedure::Dynamic(proc) => {
 				//run dynamic procedure
+				return String::new();
 			},
 			Procedure::Lua(proc) => {
-				proc.run(req);
+				let req_clone = req.clone();
+				return tokio::task::spawn_blocking(move||{
+					return proc.run(&req_clone).to_string();
+				}).await.unwrap();
 			},
 		}
 	}
@@ -37,6 +44,6 @@ impl API {
 	}
 
 	pub fn add_lua_procedure(&mut self, endpoint: String, path: String) {
-		self.procedures.insert(endpoint, Procedure::Lua(LuaProcedure::new(path)));
+		self.procedures.insert(format!("/api/{}", endpoint), Procedure::Lua(LuaProcedure::new(path)));
 	}
 }
